@@ -1,20 +1,38 @@
-# 1. Projeto: Inferência Otimizada de LLM com Streaming de Memória CPU ↔ GPU
+# 1. Projeto: Inferência Otimizada de LLM com Offloading Automático CPU ↔ GPU
 
 <div align="justify">
 
-Este projeto implementa um pipeline completo de inferência otimizada para Large Language Models (LLMs) utilizando TinyLlama 1.1B com foco em execução eficiente em hardware limitado.
+Este projeto implementa um pipeline moderno de inferência otimizada para Large Language Models (LLMs) utilizando TinyLlama 1.1B com foco em execução eficiente em hardware limitado.
 
-O principal objetivo não foi apenas executar uma LLM localmente, mas construir um sistema de inferência capaz de:
+O principal objetivo do projeto foi executar uma LLM moderna utilizando pouca VRAM através de:
 
-* utilizar pouca VRAM
-* aproveitar RAM como memória auxiliar
-* fazer streaming dinâmico de pesos
-* reduzir uso de memória GPU
-* manter boa velocidade de geração
+* quantização 4-bit
+* FP16
+* KV Cache
+* Flash Attention
+* offloading automático CPU ↔ GPU
+* gerenciamento dinâmico de memória
 
-O projeto utiliza quantização 4-bit, inferência FP16, KV Cache e offloading automático CPU ↔ GPU através do runtime moderno do Hugging Face Accelerate.
+O projeto foi desenvolvido inicialmente como uma tentativa de implementar layer-wise inference manualmente, movendo explicitamente cada layer entre CPU e GPU.
 
-O resultado final foi um sistema capaz de executar uma LLM moderna consumindo menos de 1 GB de VRAM em uma NVIDIA T4.
+Entretanto, durante o desenvolvimento surgiram diversos desafios internos relacionados à arquitetura moderna do Llama, principalmente:
+
+* rotary embeddings
+* apply_rotary_pos_emb
+* causal masks
+* KV cache
+* gerenciamento interno de atenção
+* sincronização CPU/GPU
+
+A solução final foi utilizar o runtime moderno do Hugging Face Accelerate para delegar automaticamente:
+
+* gerenciamento de memória
+* streaming CPU ↔ GPU
+* dispatch de layers
+* KV cache
+* rotary embeddings
+
+O resultado final foi um sistema extremamente eficiente, capaz de executar TinyLlama utilizando menos de 1 GB de VRAM em uma NVIDIA T4.
 
 </div>
 
@@ -31,8 +49,8 @@ O projeto foi construído utilizando:
 * Accelerate
 * BitsAndBytes
 * CUDA
-* Quantização NF4
 * FP16
+* Quantização NF4
 * KV Cache
 * Flash Attention
 
@@ -44,42 +62,27 @@ Modelo utilizado:
 
 ---
 
-# 3. Objetivo Arquitetural do Projeto
+# 3. Objetivo Principal do Projeto
 
 <div align="justify">
 
-O principal diferencial deste projeto foi implementar inferência orientada a memória.
+O principal conceito arquitetural deste projeto foi utilizar memória de forma inteligente.
 
-Ao invés de manter todos os pesos permanentemente carregados na GPU, o sistema utiliza:
+Ao invés de manter todos os pesos permanentemente carregados na GPU, o runtime utiliza:
 
 * VRAM como cache rápido
 * RAM como armazenamento auxiliar
-* streaming dinâmico CPU ↔ GPU
-* carregamento sob demanda
+* streaming automático CPU ↔ GPU
+* carregamento dinâmico sob demanda
 
-Essa abordagem permite executar modelos relativamente grandes em GPUs pequenas.
+Na prática:
 
-A filosofia principal do projeto foi:
+* parte do modelo permanece na RAM
+* apenas partes necessárias vão para GPU
+* a VRAM é constantemente reutilizada
+* o runtime controla automaticamente o offloading
 
-</div>
-
-```text
-carregar apenas o necessário na GPU
-executar
-liberar memória
-continuar o streaming
-```
-
-<div align="justify">
-
-Esse conceito é utilizado em runtimes modernos como:
-
-* vLLM
-* DeepSpeed ZeRO-Inference
-* llama.cpp
-* Ollama
-* TensorRT-LLM
-* Hugging Face Accelerate
+Isso permite executar modelos relativamente grandes em GPUs pequenas.
 
 </div>
 
@@ -97,17 +100,15 @@ O ambiente utiliza bibliotecas modernas para inferência otimizada.
 !pip install -U transformers -q
 !pip install -U bitsandbytes>=0.46.1 -q
 !pip install -U accelerate -q
-!pip install -U huggingface_hub -q
 ```
 
 <div align="justify">
 
 Cada biblioteca possui uma função específica:
 
-* `transformers` → runtime principal do modelo
+* `transformers` → runtime principal da LLM
 * `bitsandbytes` → quantização 4-bit
-* `accelerate` → streaming CPU/GPU
-* `huggingface_hub` → autenticação e download
+* `accelerate` → offloading automático CPU/GPU
 
 </div>
 
@@ -132,46 +133,63 @@ TOP_K = 50
 
 USE_4BIT = True
 
-SAVE_PATH = "./tinyllama_local"
+PROMPT = """
+Explain why transformers consume a lot of memory.
+"""
 ```
 
 <div align="justify">
 
 Esses parâmetros controlam:
 
-* modelo carregado
+* modelo utilizado
+* quantidade máxima de tokens
 * diversidade textual
-* tamanho máximo da geração
-* ativação de quantização
-* armazenamento local do modelo
+* ativação da quantização
+* prompt de entrada
 
 </div>
 
 ---
 
-# 6. Login no Hugging Face
+# 6. Otimizações CUDA
 
 <div align="justify">
 
-O projeto suporta autenticação via Hugging Face Token.
+O projeto ativa otimizações modernas da NVIDIA para acelerar inferência e reduzir overhead computacional.
 
 </div>
 
 ```python
-from huggingface_hub import login
+if DEVICE == "cuda":
 
-HF_TOKEN = "SEU_TOKEN"
+    print(torch.cuda.get_device_name(0))
 
-login(HF_TOKEN)
+    torch.backends.cuda.matmul.allow_tf32 = True
+
+    torch.set_float32_matmul_precision("high")
+
+    torch.backends.cuda.enable_flash_sdp(True)
+
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+
+    torch.cuda.empty_cache()
 ```
 
 <div align="justify">
 
-Isso permite:
+Essas otimizações ativam:
 
-* download automático
-* acesso a modelos privados
-* autenticação persistente
+* Tensor Cores
+* TF32
+* Flash Attention kernels
+* memória eficiente para self-attention
+
+O objetivo é reduzir:
+
+* uso de VRAM
+* latência inferencial
+* movimentação de memória
 
 </div>
 
@@ -181,7 +199,7 @@ Isso permite:
 
 <div align="justify">
 
-A quantização foi um dos pilares principais do projeto.
+A quantização foi um dos pilares centrais do projeto.
 
 </div>
 
@@ -212,17 +230,43 @@ Isso reduz drasticamente:
 * uso de RAM
 * bandwidth de memória
 
-Sem quantização, mesmo TinyLlama consumiria muito mais memória.
+Sem quantização, o consumo de memória seria muito maior.
 
 </div>
 
 ---
 
-# 8. Streaming de Memória CPU ↔ GPU
+# 8. Tokenizer
 
 <div align="justify">
 
-O conceito mais importante do projeto está neste bloco:
+O tokenizer converte texto em tokens inteiros utilizados pela LLM.
+
+</div>
+
+```python
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_NAME
+)
+
+if tokenizer.pad_token is None:
+
+    tokenizer.pad_token = tokenizer.eos_token
+```
+
+<div align="justify">
+
+O `pad_token` foi ajustado para evitar problemas durante geração autoregressiva.
+
+</div>
+
+---
+
+# 9. Carregamento do Modelo
+
+<div align="justify">
+
+O ponto mais importante do projeto está neste bloco:
 
 </div>
 
@@ -231,13 +275,14 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
     quantization_config=bnb_config,
     torch_dtype=torch.float16,
-    device_map="auto"
+    device_map="auto",
+    low_cpu_mem_usage=True
 )
 ```
 
 <div align="justify">
 
-O parâmetro mais importante aqui é:
+O parâmetro mais importante é:
 
 </div>
 
@@ -249,37 +294,18 @@ device_map="auto"
 
 Ele ativa gerenciamento automático de memória através do Accelerate.
 
-Internamente o runtime faz algo parecido com:
+Internamente o runtime:
 
-</div>
-
-```text
-Layer 1 → GPU
-executa
-remove
-
-Layer 2 → GPU
-executa
-remove
-
-Layer 3 → GPU
-executa
-remove
-```
-
-<div align="justify">
-
-Isso significa que:
-
-* parte do modelo permanece na RAM
-* apenas partes necessárias vão para GPU
-* VRAM é constantemente liberada
-* pesos são streamados dinamicamente
+* distribui layers entre CPU e GPU
+* faz offloading automático
+* reutiliza VRAM dinamicamente
+* streama pesos sob demanda
+* evita manter o modelo inteiro na GPU
 
 Na prática:
 
 * GPU funciona como cache rápido
-* RAM funciona como armazenamento auxiliar
+* RAM funciona como memória auxiliar
 
 Esse mecanismo é conhecido como:
 
@@ -307,7 +333,7 @@ Essa foi a principal ideia arquitetural do projeto.
 
 ---
 
-# 9. Inferência FP16
+# 10. Inferência FP16
 
 <div align="justify">
 
@@ -339,79 +365,31 @@ Além disso, ativa Tensor Cores da GPU NVIDIA.
 
 ---
 
-# 10. Salvamento Local do Modelo
+# 11. Tokenização do Prompt
 
 <div align="justify">
 
-O projeto também salva os pesos localmente após o primeiro download.
+O prompt é convertido para tensores PyTorch.
 
 </div>
 
 ```python
-if not os.path.exists(SAVE_PATH):
+inputs = tokenizer(
+    PROMPT,
+    return_tensors="pt"
+)
 
-    model.save_pretrained(SAVE_PATH)
+input_ids = inputs["input_ids"].to(DEVICE)
 
-    tokenizer.save_pretrained(SAVE_PATH)
+attention_mask = inputs["attention_mask"].to(DEVICE)
 ```
 
 <div align="justify">
 
-Isso evita:
+Esses tensores representam:
 
-* redownload
-* tráfego desnecessário
-* dependência constante da internet
-
-Depois disso o carregamento ocorre diretamente do disco.
-
-</div>
-
----
-
-# 11. Carregamento Inteligente
-
-<div align="justify">
-
-O carregamento verifica automaticamente se o modelo já existe localmente.
-
-</div>
-
-```python
-if os.path.exists(SAVE_PATH):
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        SAVE_PATH
-    )
-
-    model = AutoModelForCausalLM.from_pretrained(
-        SAVE_PATH,
-        quantization_config=bnb_config,
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
-
-else:
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_NAME
-    )
-
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        quantization_config=bnb_config,
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
-```
-
-<div align="justify">
-
-Esse mecanismo melhora significativamente:
-
-* inicialização
-* estabilidade
-* velocidade de uso
+* tokens da sequência
+* máscara causal da atenção
 
 </div>
 
@@ -496,7 +474,7 @@ Os ganhos incluem:
 
 <div align="justify">
 
-A geração foi realizada utilizando `model.generate()`.
+A geração foi realizada utilizando o runtime oficial do Transformers.
 
 </div>
 
@@ -524,36 +502,92 @@ O runtime gerencia automaticamente:
 * causal attention
 * sampling
 * decoding
+* offloading CPU/GPU
 
-Isso eliminou diversos erros encontrados durante tentativas manuais de layer-wise inference.
+Isso eliminou diversos erros encontrados durante as tentativas iniciais de implementar layer-wise inference manualmente.
 
 </div>
 
 ---
 
-# 15. Problemas Encontrados
+# 15. Decodificação do Texto
 
 <div align="justify">
 
-Durante o desenvolvimento surgiram vários problemas relacionados a:
+Após a geração, os tokens são convertidos novamente para texto.
 
-* rotary embeddings
-* position ids
+</div>
+
+```python
+generated_text = tokenizer.decode(
+    outputs[0],
+    skip_special_tokens=True
+)
+```
+
+<div align="justify">
+
+Isso transforma os IDs inteiros produzidos pela LLM em linguagem natural.
+
+</div>
+
+---
+
+# 16. Benchmark de Memória
+
+<div align="justify">
+
+O projeto também mede consumo de VRAM.
+
+</div>
+
+```python
+peak = torch.cuda.max_memory_allocated() / 1024**3
+
+print(f"Peak GPU Memory: {peak:.2f} GB")
+```
+
+<div align="justify">
+
+Isso permitiu validar a eficiência do offloading automático.
+
+</div>
+
+---
+
+# 17. Problemas Encontrados Durante o Desenvolvimento
+
+<div align="justify">
+
+Durante o desenvolvimento surgiram vários problemas internos relacionados à arquitetura moderna do Llama.
+
+Os principais erros envolveram:
+
+* `apply_rotary_pos_emb`
+* `position_embeddings`
+* `NoneType unpacking`
+* mismatch CPU/GPU
+* dimension mismatch
 * causal masks
 * KV cache
-* mismatch CPU/GPU
-* apply_rotary_pos_emb
+* sincronização de dispositivos
 
-A tentativa inicial era implementar layer streaming manualmente.
+A tentativa inicial era implementar manualmente:
+
+* layer streaming
+* rotary embeddings
+* KV cache
+* dispatch de layers
 
 Entretanto, os runtimes modernos do Llama possuem muitos detalhes internos complexos.
 
 A solução correta foi delegar:
 
 * rotary embeddings
-* KV cache
 * causal masks
+* KV cache
 * offloading
+* gerenciamento de memória
 
 para o runtime oficial do Hugging Face.
 
@@ -561,7 +595,7 @@ para o runtime oficial do Hugging Face.
 
 ---
 
-# 16. Resultado Final
+# 18. Resultado Final
 
 <div align="justify">
 
@@ -576,15 +610,15 @@ Peak GPU Memory: 0.87 GB
 
 <div align="justify">
 
-Isso demonstra que:
+Isso demonstrou que:
 
 * quantização funcionou corretamente
-* streaming CPU/GPU funcionou
 * offloading automático funcionou
 * KV cache estava ativo
 * Flash Attention estava ativo
+* gerenciamento dinâmico de memória funcionou
 
-O mais impressionante foi o baixo consumo de VRAM:
+O ponto mais impressionante foi o baixo consumo de VRAM:
 
 </div>
 
@@ -600,7 +634,7 @@ para uma LLM de 1.1B parâmetros.
 
 ---
 
-# 17. Exemplo de Texto Gerado
+# 19. Exemplo de Texto Gerado
 
 <div align="justify">
 
@@ -618,40 +652,40 @@ Memory usage in a transformer is dependent on the model size and the number of l
 
 Isso confirmou que:
 
-* attention estava correta
 * embeddings estavam corretos
+* self-attention estava funcionando
 * geração autoregressiva estava estável
+* o runtime estava gerenciando corretamente o modelo
 
 </div>
 
 ---
 
-# 18. Conclusão
+# 20. Conclusão
 
 <div align="justify">
 
-Este projeto demonstrou na prática como executar Large Language Models modernas em hardware relativamente limitado utilizando técnicas avançadas de gerenciamento de memória.
+Este projeto demonstrou como executar Large Language Models modernas em hardware relativamente limitado utilizando técnicas modernas de inferência otimizada.
 
-O principal aprendizado não foi apenas sobre Transformers, mas sobre engenharia de runtime de inferência.
+O principal aprendizado não foi apenas sobre Transformers, mas sobre engenharia de runtime para LLMs.
 
-Hoje, grande parte da eficiência de LLMs depende de:
+Hoje, grande parte da eficiência de inferência depende de:
 
+* quantização
 * memory streaming
 * CPU/GPU offloading
-* quantização
 * KV cache
 * Flash Attention
 * gerenciamento dinâmico de memória
 
-A implementação final mostrou que GPUs pequenas conseguem executar modelos modernos de forma extremamente eficiente quando o runtime correto é utilizado.
+O projeto também mostrou que frameworks modernos como Hugging Face Accelerate já implementam internamente mecanismos extremamente sofisticados de:
 
-O projeto também evidenciou que frameworks modernos como Hugging Face Accelerate já implementam internamente mecanismos extremamente sofisticados de:
-
-* layer dispatch
-* memory balancing
+* dispatch de layers
+* balancing de memória
+* offloading automático
 * streaming de pesos
-* gerenciamento automático de dispositivos
+* gerenciamento de dispositivos
 
-A arquitetura final ficou muito próxima dos runtimes profissionais utilizados atualmente para serving de LLMs em produção.
+A implementação final ficou muito próxima da filosofia utilizada em runtimes profissionais modernos de serving de LLMs.
 
 </div>
